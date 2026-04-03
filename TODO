@@ -1,0 +1,8 @@
+1. Fill out training
+    - use focal loss? or BCEWithLogitsLoss + pos_weight + WeightedRandomSampler
+    - albumentations
+    - k-fold StratifiedGroupKFold on patient ID
+    - set up hyp sweep
+    - good idea to train naive one too for comparison?
+    
+2. add dataset processing
