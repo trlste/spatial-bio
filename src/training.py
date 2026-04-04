@@ -20,7 +20,7 @@ base_config = {
     'lr'           : 2e-4,
     'weight_decay' : 1e-2,
     'dropout'      : 0.4,
-    'n_folds'      : 5,
+    'n_folds'      : 3,
     'n_classes'    : 5,
     'aug_prob'     : 0.75,
     'seed'         : 42,
