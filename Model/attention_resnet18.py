@@ -5,7 +5,7 @@ from torchvision.models import resnet18, ResNet18_Weights
 from Module.attention_block import AttentionBlock
 
 class AttentionResNet18(nn.Module):
-    def __init__(self, in_channels=3, n_classes=2, dropout=0.4, pretrained=False):
+    def __init__(self, in_channels=3, n_classes=5, dropout=0.4, pretrained=False):
         super().__init__()
 
         # Stage 1
@@ -69,8 +69,8 @@ class AttentionResNet18(nn.Module):
             for our_block, their_block in zip(our_stage, their_layer):
                 our_block.conv1.load_state_dict(their_block.conv1.state_dict())
                 our_block.conv2.load_state_dict(their_block.conv2.state_dict())
-                our_block.bn1.load_state_dict(their_block.bn1.state_dict())
-                our_block.bn2.load_state_dict(their_block.bn2.state_dict())
+                #our_block.bn1.load_state_dict(their_block.bn1.state_dict())
+                #our_block.bn2.load_state_dict(their_block.bn2.state_dict())
                 if hasattr(their_block, 'downsample') and their_block.downsample is not None:
                     our_block.shortcut.load_state_dict(their_block.downsample[0].state_dict())
 
