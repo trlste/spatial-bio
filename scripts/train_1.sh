@@ -11,4 +11,4 @@ conda activate isic2024
 
 cd /net/dali/home/mscbio/yur28/spatial-bio
 
-python -m src.training --model NaiveResNet18
+python -m src.training --model AttentionResNet18

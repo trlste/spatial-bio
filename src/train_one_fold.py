@@ -8,6 +8,8 @@ from src.dataset import get_datasets
 from src.transforms import train_transform, val_transform
 from sklearn.metrics import accuracy_score, roc_auc_score
 
+print(f"Using device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+
 def train_one_fold(model, fold, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -31,6 +33,8 @@ def train_one_fold(model, fold, config):
                               shuffle=True,  num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_dataset,   batch_size=config['batch_size'],
                               shuffle=False, num_workers=4, pin_memory=True)
+    
+    print("Finished loading data")
 
     model     = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(),
@@ -46,7 +50,8 @@ def train_one_fold(model, fold, config):
         model.train()
         train_loss = 0
 
-        for imgs, labels in train_loader:
+
+        for batch_idx, (imgs, labels) in enumerate(train_loader):
             imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
 
@@ -56,6 +61,11 @@ def train_one_fold(model, fold, config):
             optimizer.step()
 
             train_loss += loss.item()
+            if batch_idx % 10 == 0:
+                print(f"step = {epoch * len(train_loader) + batch_idx}, train/batch_loss = {loss.item()}")
+                log_metrics({
+                    'train/batch_loss': loss.item(),
+                }, step=epoch * len(train_loader) + batch_idx)
 
         # --- val ---
         model.eval()
