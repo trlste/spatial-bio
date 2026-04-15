@@ -4,10 +4,16 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from src.logger import init_wandb, log_metrics, finish_wandb
-from src.dataset import get_datasets
-from src.transforms import train_transform, val_transform
-from sklearn.metrics import accuracy_score, roc_auc_score
+from .logger import (
+    collect_gradient_stats,
+    compute_classification_metrics,
+    finish_wandb,
+    init_wandb,
+    log_metrics,
+    summarize_gradient_stats,
+)
+from .dataset import get_datasets
+from .transforms import train_transform, val_transform
 
 def train_one_fold(model, fold, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -18,14 +24,14 @@ def train_one_fold(model, fold, config):
         name    = f"{config['model_name']}-fold-{fold}"
     )
 
-    train_dataset, val_dataset, class_weights = get_datasets(
+    train_dataset, val_dataset, class_weights, class_names = get_datasets(
         csv_path        = config['csv_path'],
         image_dir       = config['image_dir'],
         fold            = fold,
         n_folds         = config['n_folds'],
         train_transform = train_transform,
         val_transform   = val_transform,
-        device          = device
+        device          = device.type
     )
 
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'],
@@ -46,7 +52,11 @@ def train_one_fold(model, fold, config):
     for epoch in range(config['epochs']):
         # --- train ---
         model.train()
-        train_loss = 0
+        train_loss = 0.0
+        train_probs = []
+        train_preds = []
+        train_labels = []
+        train_grad_stats = []
 
         for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
@@ -55,13 +65,19 @@ def train_one_fold(model, fold, config):
             outputs = model(imgs)
             loss    = criterion(outputs, labels.long())
             loss.backward()
+            grad_stats = collect_gradient_stats(model)
+            if grad_stats:
+                train_grad_stats.append(grad_stats)
             optimizer.step()
 
             train_loss += loss.item()
+            train_probs.extend(torch.softmax(outputs.detach(), dim=1).cpu().numpy())
+            train_preds.extend(outputs.detach().argmax(dim=1).cpu().numpy())
+            train_labels.extend(labels.cpu().numpy())
 
         # --- val ---
         model.eval()
-        val_loss   = 0
+        val_loss   = 0.0
         all_probs  = []
         all_preds  = []
         all_labels = []
@@ -80,24 +96,46 @@ def train_one_fold(model, fold, config):
 
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss   = val_loss   / len(val_loader)
-        accuracy = accuracy_score(all_labels, all_preds)        
-        auc      = roc_auc_score(all_labels, all_probs, multi_class='ovr', average='macro')
 
-        log_metrics({
+        metrics = {
             'epoch'      : epoch + 1,
             'train/loss' : avg_train_loss,
             'val/loss'   : avg_val_loss,
-            'val/accuracy' : accuracy,
-            'val/auc_macro': auc,
             'lr'         : optimizer.param_groups[0]['lr'],
-        }, step=epoch)
+        }
+        metrics.update(compute_classification_metrics(
+            labels=train_labels,
+            preds=train_preds,
+            probs=train_probs,
+            class_names=class_names,
+            split='train',
+            benign_class_name='benign',
+            pauc_min_tpr=0.8,
+        ))
+        metrics.update(compute_classification_metrics(
+            labels=all_labels,
+            preds=all_preds,
+            probs=all_probs,
+            class_names=class_names,
+            split='val',
+            benign_class_name='benign',
+            pauc_min_tpr=0.8,
+        ))
+        metrics.update(summarize_gradient_stats(train_grad_stats, split='train'))
+
+        log_metrics(metrics, step=epoch)
+
+        val_auc = metrics.get('val/auc_macro', float('nan'))
+        val_acc = metrics.get('val/accuracy', float('nan'))
+        val_pauc = metrics.get('val/malignant_vs_benign/pauc_tpr_ge_80')
+        pauc_text = f" val_pauc80={val_pauc:.4f}" if val_pauc is not None else ""
 
         print(f"[{config['model_name']} | fold {fold} | epoch {epoch+1}] "
               f"train_loss={avg_train_loss:.4f} val_loss={avg_val_loss:.4f} "
-              f"val_auc={auc:.4f}")
+              f"val_acc={val_acc:.4f} val_auc={val_auc:.4f}{pauc_text}")
 
-        if auc > best_auc:
-            best_auc = auc
+        if 'val/auc_macro' in metrics and metrics['val/auc_macro'] > best_auc:
+            best_auc = metrics['val/auc_macro']
             torch.save(model.state_dict(),
                        f"checkpoints/{config['model_name']}_fold{fold}_best.pt")
 

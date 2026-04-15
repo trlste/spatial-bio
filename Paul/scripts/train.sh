@@ -48,6 +48,12 @@ echo "========================================="
 
 mkdir -p logs checkpoints
 
-CUDA_VISIBLE_DEVICES=0 python -m src.training --model CustomCNN
+#CUDA_VISIBLE_DEVICES=0 python -m src.training --model CustomCNN
+
+#CUDA_VISIBLE_DEVICES=0 python -m src.training --model CustomCNNResidualAttention
+
+#CUDA_VISIBLE_DEVICES=0 python -m src.training --model AttentionResNet18
+
+#CUDA_VISIBLE_DEVICES=0 python -m src.training --model NaiveResNet18
 
 #wait  # important -- keeps the job alive until both processes finish

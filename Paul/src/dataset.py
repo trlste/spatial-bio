@@ -28,6 +28,7 @@ class SkinDataset(Dataset):
 
 def get_class_weights(df, label_col='iddx_processed', n_classes=5, device='cpu'):
     class_counts = df[label_col].value_counts().sort_index()
+    class_counts = class_counts.reindex(range(n_classes), fill_value=1)
     weights      = 1.0 / class_counts.values
     weights      = weights / weights.sum() * n_classes
     return torch.tensor(weights, dtype=torch.float32).to(device)
@@ -51,6 +52,7 @@ def get_folds(csv_path, n_folds=5, seed=42):
 def get_datasets(csv_path, image_dir, fold, n_folds=5, seed=42,
                  train_transform=None, val_transform=None, device='cuda'):
     df = get_folds(csv_path, n_folds=n_folds, seed=seed)
+    label_categories = df['iddx_processed'].astype('category').cat.categories.tolist()
     df['iddx_processed'] = df['iddx_processed'].astype('category').cat.codes
 
     train_df = df[df['fold'] != fold]
@@ -60,4 +62,4 @@ def get_datasets(csv_path, image_dir, fold, n_folds=5, seed=42,
     val_dataset   = SkinDataset(val_df,   image_dir, transform=val_transform)
     class_weights  = get_class_weights(train_df, device=device)  # computed on train only
 
-    return train_dataset, val_dataset, class_weights
+    return train_dataset, val_dataset, class_weights, label_categories

@@ -35,7 +35,7 @@ base_config = {
     'dropout'      : 0.4,
     'n_folds'      : 3,
     'n_classes'    : 5,
-    'aug_prob'     : 0.75,
+    'aug_prob'     : 1.0,
     'seed'         : 42,
     'custom_base_channels'             : args.custom_base_channels,
     'custom_adaptive_pool_size'        : args.custom_adaptive_pool_size,
