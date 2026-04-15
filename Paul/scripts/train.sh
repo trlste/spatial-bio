@@ -2,8 +2,9 @@
 #SBATCH --job-name=isic_training
 #SBATCH --output=logs/training_%j.out
 #SBATCH --error=logs/training_%j.err
-#SBATCH --partition=dept_gpu
+#SBATCH --partition=koes_gpu
 #SBATCH --constraint=L40
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 
 # ─── environment setup ──────────────────────────────────────────────────────
@@ -11,7 +12,7 @@ echo ""
 echo "Setting up conda environment..."
 source /net/dali/home/mscbio/pas195/miniconda3/etc/profile.d/conda.sh
 eval "$(conda shell.bash hook)"
-conda activate Electrostat
+conda activate isic2024
 
 echo "Activated conda environment: $(conda info --envs | grep '*')"
 echo "Python path: $(which python)"

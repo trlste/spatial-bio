@@ -2,11 +2,15 @@
 
 import os
 import argparse
+from pathlib import Path
 from Model.attention_resnet18 import AttentionResNet18
 from Model.naive_resnet18 import NaiveResNet18
 from Model.custom_cnn import CustomCNN
 from Model.custom_cnn_residual_attention import CustomCNNResidualAttention
 from src.train_one_fold import train_one_fold
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DATA_ROOT = REPO_ROOT / 'data'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, required=True,
@@ -21,8 +25,8 @@ parser.add_argument('--custom-ra-attention-skip', type=int, default=1)
 args = parser.parse_args()
 
 base_config = {
-    'csv_path'     : 'data/ISIC_2024_Training_Supplement_processed.csv',
-    'image_dir'    : 'data/ISIC_2024_Training_Input',
+    'csv_path'     : str(DATA_ROOT / 'ISIC_2024_Training_Supplement_processed.csv'),
+    'image_dir'    : str(DATA_ROOT / 'ISIC_2024_Training_Input'),
     'img_size'     : 135,
     'batch_size'   : 256,
     'epochs'       : 30,
