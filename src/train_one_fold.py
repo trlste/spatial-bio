@@ -41,7 +41,8 @@ def train_one_fold(model, fold, config):
                                   lr=config['lr'],
                                   weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    #criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = FocalLoss(gamma=2.0, weight=class_weights)
 
     best_auc = 0
 
@@ -61,11 +62,11 @@ def train_one_fold(model, fold, config):
             optimizer.step()
 
             train_loss += loss.item()
-            if batch_idx % 10 == 0:
-                print(f"step = {epoch * len(train_loader) + batch_idx}, train/batch_loss = {loss.item()}")
-                log_metrics({
-                    'train/batch_loss': loss.item(),
-                }, step=epoch * len(train_loader) + batch_idx)
+            #if batch_idx % 10 == 0:
+            #    print(f"step = {epoch * len(train_loader) + batch_idx}, train/batch_loss = {loss.item()}")
+            #    log_metrics({
+            #        'train/batch_loss': loss.item(),
+            #    }, step=epoch * len(train_loader) + batch_idx)
 
         # --- val ---
         model.eval()

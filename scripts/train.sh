@@ -4,7 +4,7 @@
 #SBATCH --error=logs/training_%j.err
 #SBATCH --partition=dept_gpu
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=g011,g013,g[014-015],g123
+#SBATCH --exclude=g011,g006,g013,g[014-015],g123
 
 source ~/.bashrc
 conda activate isic2024
