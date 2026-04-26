@@ -5,3 +5,5 @@ wandb/
 __pycache__/
 
 *.pyc
+*.pt
+Paul/scripts/*
