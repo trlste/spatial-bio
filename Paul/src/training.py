@@ -14,7 +14,7 @@ DATA_ROOT = REPO_ROOT / 'data'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, required=True,
-                    choices=['AttentionResNet18', 'NaiveResNet18', 'CustomCNN', 'CustomCNNResidualAttention'])
+                    choices=['AttentionResNet18', 'NaiveResNet18', 'CustomCNN', 'CustomCNNResidualAttention', 'NaiveResNet18_smoteenn'])
 parser.add_argument('--custom-base-channels', type=int, default=64)
 parser.add_argument('--custom-adaptive-pool-size', type=int, default=8)
 parser.add_argument('--custom-classifier-hidden-dim', type=int, default=1024)
@@ -49,6 +49,7 @@ base_config = {
 model_map = {
         'AttentionResNet18': AttentionResNet18,
         'NaiveResNet18'    : NaiveResNet18,
+        'NaiveResNet18_smoteenn'    : NaiveResNet18,
         'CustomCNN'        : CustomCNN,
         'CustomCNNResidualAttention': CustomCNNResidualAttention,
     }

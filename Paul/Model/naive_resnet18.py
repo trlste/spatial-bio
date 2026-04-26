@@ -20,3 +20,10 @@ class NaiveResNet18(nn.Module):
         x = torch.flatten(x, 1)
         x = self.dropout(x)
         return self.fc(x)
+    
+    def extract_features(self, x):
+        """Returns 512-dim embeddings before dropout/fc — used for SMOTEENN."""
+        with torch.no_grad():
+            x = self.backbone(x)
+            x = torch.flatten(x, 1)
+        return x  # shape: (B, 512)

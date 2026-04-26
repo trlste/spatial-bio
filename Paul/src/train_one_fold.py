@@ -14,9 +14,13 @@ from .logger import (
 )
 from .dataset import get_datasets
 from .transforms import train_transform, val_transform
+from .focal_loss import FocalLoss
+from .dataset import get_datasets, apply_smoteenn, apply_smoteenn_naive
+from torch.utils.data import TensorDataset
 
 def train_one_fold(model, fold, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
     init_wandb(
         config  = config,
@@ -40,11 +44,40 @@ def train_one_fold(model, fold, config):
                               shuffle=False, num_workers=4, pin_memory=True)
 
     model     = model.to(device)
+
+    print("Extracting embeddings for SMOTEENN...")
+    X_res, y_res = apply_smoteenn(model, train_dataset, device=device,
+                                  batch_size=config['batch_size'])
+
+    # Wrap resampled embeddings as a TensorDataset for the head trainer
+    X_tensor = torch.tensor(X_res, dtype=torch.float32)
+    y_tensor = torch.tensor(y_res, dtype=torch.long)
+    resampled_dataset = TensorDataset(X_tensor, y_tensor)
+    resampled_loader  = DataLoader(resampled_dataset,
+                                   batch_size=config['batch_size'],
+                                   shuffle=True, num_workers=0)
+    
+    print("Pre-training fc head on SMOTEENN-resampled embeddings...")
+    head_optimizer = torch.optim.AdamW(model.fc.parameters(), lr=1e-3)
+    criterion_head = FocalLoss(gamma=2.0, alpha=class_weights)
+
+    for epoch in range(5):                               # short warmup, ~5 epochs
+        model.train()
+        for X_batch, y_batch in resampled_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            head_optimizer.zero_grad()
+            out  = model.fc(X_batch)                     # skip backbone entirely
+            loss = criterion_head(out, y_batch)
+            loss.backward()
+            head_optimizer.step()
+        print(f"  Head warmup epoch {epoch+1}/5 done")
+
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=config['lr'],
                                   weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    #criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = FocalLoss(gamma=2.0, alpha=class_weights)
 
     os.makedirs("checkpoints", exist_ok=True)
     best_auc = 0
