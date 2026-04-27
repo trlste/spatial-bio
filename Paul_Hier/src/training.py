@@ -56,8 +56,16 @@ parser.add_argument('--use-sampler', type=int, choices=[0, 1], default=0,
                     help='Enable WeightedRandomSampler with sqrt class weights.')
 parser.add_argument('--use-smoteenn', type=int, choices=[0, 1], default=None,
                     help='Enable SMOTE warmup explicitly (1=on, 0=off). If omitted, inferred from *_smoteenn model names for backward compatibility.')
-parser.add_argument('--use-libauc', type=int, choices=[0, 1], default=0,
-                    help='Use LibAUC pAUCLoss + SOPAs optimizer instead of CE/BCE.')
+parser.add_argument('--libauc-mode', choices=['off', 'full', 'two_stage'], default='off',
+                    help='LibAUC training mode. off=HierarchicalLoss only (default). '
+                         'full=PAUCLoss + SOPAs + DualSampler from epoch 0. '
+                         'two_stage=HierarchicalLoss for epochs [0, stage2_epoch), '
+                         'then switch to PAUCLoss + SOPAs + DualSampler for the rest. '
+                         'Replaces the old --use-libauc flag.')
+parser.add_argument('--libauc-stage2-epoch', type=int, default=-1,
+                    help='Epoch at which two_stage mode switches from CE/BCE to pAUC. '
+                         'Required when --libauc-mode=two_stage; must be in (0, epochs). '
+                         'Ignored (and must be -1) for other modes.')
 parser.add_argument('--libauc-sampling-rate', type=float, default=0.1,
                     help='DualSampler positive sampling rate for LibAUC runs (ignored if --libauc-num-pos > 0).')
 parser.add_argument('--libauc-num-pos', type=int, default=0,
@@ -85,6 +93,30 @@ parser.add_argument('--phase-suffix', type=str, default='',
                     help='Optional suffix appended to auto-generated phase tag.')
 
 args = parser.parse_args()
+
+
+# Validate libauc-mode / libauc-stage2-epoch combination.
+if args.libauc_mode == 'two_stage':
+    if args.libauc_stage2_epoch <= 0:
+        raise ValueError(
+            '--libauc-mode two_stage requires --libauc-stage2-epoch > 0.'
+        )
+    if args.libauc_stage2_epoch >= args.epochs:
+        raise ValueError(
+            f'--libauc-stage2-epoch ({args.libauc_stage2_epoch}) must be '
+            f'< --epochs ({args.epochs}); otherwise the switch never fires.'
+        )
+    if args.libauc_stage2_epoch < args.hier_freeze_backbone_epochs:
+        print(
+            f'[warn] --libauc-stage2-epoch ({args.libauc_stage2_epoch}) is < '
+            f'--hier-freeze-backbone-epochs ({args.hier_freeze_backbone_epochs}); '
+            f'pAUC training will start while the backbone is still frozen.'
+        )
+elif args.libauc_stage2_epoch != -1:
+    raise ValueError(
+        f'--libauc-stage2-epoch is only valid with --libauc-mode two_stage '
+        f'(got mode={args.libauc_mode!r}).'
+    )
 
 
 def _resolve_use_smoteenn(args):
@@ -120,8 +152,10 @@ def _phase_tag(args):
         parts.append('smoteenn')
     if args.use_sampler:
         parts.append('sampler')
-    if args.use_libauc:
+    if args.libauc_mode == 'full':
         parts.append('libauc')
+    elif args.libauc_mode == 'two_stage':
+        parts.append(f'libauc2s{args.libauc_stage2_epoch}')
     if args.use_ema:
         parts.append('ema')
     if args.hier_partial_unfreeze and args.model in ('HierarchicalResNet18', 'HierarchicalResNet18_smoteenn'):
@@ -136,12 +170,12 @@ def _phase_tag(args):
 base_config = {
     'csv_path'     : str(DATA_ROOT / 'ISIC_2024_Training_Supplement_processed.csv'),
     'image_dir'    : str(DATA_ROOT / 'ISIC_2024_Training_Input'),
-    'img_size'     : 224,
+    'img_size'     : 112,
     'batch_size'   : args.batch_size,
     'epochs'       : args.epochs,
     'lr'           : args.lr,
     'weight_decay' : args.weight_decay,
-    'dropout'      : 0.4,
+    'dropout'      : 0.3,
     'n_folds'      : 3,
     'n_classes'    : 5,
     'aug_prob'     : 1.0,
@@ -171,7 +205,8 @@ base_config = {
     # training-recipe toggles
     'use_sampler'                      : bool(args.use_sampler),
     'use_smoteenn'                     : USE_SMOTEENN,
-    'use_libauc'                       : bool(args.use_libauc),
+    'libauc_mode'                      : args.libauc_mode,
+    'libauc_stage2_epoch'              : args.libauc_stage2_epoch,
     'libauc_sampling_rate'             : args.libauc_sampling_rate,
     'libauc_num_pos'                   : (args.libauc_num_pos if args.libauc_num_pos > 0 else None),
     'use_ema'                          : bool(args.use_ema),

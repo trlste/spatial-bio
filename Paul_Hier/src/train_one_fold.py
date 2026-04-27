@@ -68,6 +68,129 @@ def _build_scheduler(optimizer, config):
     return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
 
 
+def _build_train_loader(stage_uses_pauc, train_dataset, binary_train_labels,
+                        sample_weights, config, fold):
+    """Build the train DataLoader for the current stage.
+
+    Stage 1 (stage_uses_pauc=False): standard shuffle DataLoader, optionally
+        with WeightedRandomSampler if config['use_sampler'].
+    Stage 2 (stage_uses_pauc=True): DualSampler from libauc, drawing positives
+        according to libauc_num_pos (exact count) or libauc_sampling_rate
+        (fraction of batch). DualSampler requires the dataset to yield indices,
+        which is enabled upstream via return_index=True when libauc_mode != 'off'.
+    """
+    if stage_uses_pauc:
+        try:
+            from libauc.sampler import DualSampler
+        except ImportError as exc:
+            raise ImportError(
+                "LibAUC stage requires libauc. Install with `pip install libauc`."
+            ) from exc
+
+        n_pos = int(binary_train_labels.sum())
+        n_neg = int(binary_train_labels.shape[0] - n_pos)
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError(
+                f"Fold {fold} has invalid binary class mix for LibAUC: "
+                f"n_pos={n_pos}, n_neg={n_neg}."
+            )
+
+        libauc_num_pos = config.get('libauc_num_pos')
+        if libauc_num_pos is not None and int(libauc_num_pos) > 0:
+            dual_sampler = DualSampler(
+                train_dataset,
+                batch_size=config['batch_size'],
+                labels=binary_train_labels,
+                shuffle=True,
+                num_pos=int(libauc_num_pos),
+            )
+        else:
+            dual_sampler = DualSampler(
+                train_dataset,
+                batch_size=config['batch_size'],
+                labels=binary_train_labels,
+                shuffle=True,
+                sampling_rate=float(config.get('libauc_sampling_rate', 0.1)),
+            )
+
+        return DataLoader(train_dataset, batch_size=config['batch_size'],
+                          sampler=dual_sampler, shuffle=False,
+                          num_workers=1, pin_memory=True)
+
+    if config.get('use_sampler', False):
+        sampler = WeightedRandomSampler(
+            weights=torch.from_numpy(sample_weights),
+            num_samples=len(train_dataset),
+            replacement=True,
+        )
+        return DataLoader(train_dataset, batch_size=config['batch_size'],
+                          sampler=sampler, shuffle=False,
+                          num_workers=1, pin_memory=True)
+
+    return DataLoader(train_dataset, batch_size=config['batch_size'],
+                      shuffle=True, num_workers=1, pin_memory=True)
+
+
+def _build_optimizer(stage_uses_pauc, model, config):
+    """Build the optimizer for the current stage.
+
+    Stage 1 (stage_uses_pauc=False): AdamW with discriminative LR groups.
+    Stage 2 (stage_uses_pauc=True): SOPAs from libauc, paired with pAUCLoss.
+
+    Both share the same param-group structure (backbone @ lr*mult, head @ lr).
+    """
+    param_groups = _build_param_groups(
+        model, head_lr=config['lr'],
+        backbone_lr_mult=config.get('backbone_lr_mult', 1.0),
+    )
+
+    if stage_uses_pauc:
+        try:
+            from libauc.optimizers import SOPAs
+        except ImportError as exc:
+            raise ImportError(
+                "LibAUC stage requires libauc. Install with `pip install libauc`."
+            ) from exc
+        return SOPAs(param_groups, mode='adam', lr=config['lr'],
+                     weight_decay=config['weight_decay'])
+
+    return torch.optim.AdamW(param_groups, lr=config['lr'],
+                             weight_decay=config['weight_decay'])
+
+
+def _build_criterion(stage_uses_pauc, train_dataset, config, benign_idx,
+                     is_hierarchical, class_weights, device):
+    """Build the criterion for the current stage.
+
+    Stage 1 (stage_uses_pauc=False):
+        - hierarchical: HierarchicalLoss (BCE + masked CE)
+        - naive: nn.CrossEntropyLoss with class weights
+    Stage 2 (stage_uses_pauc=True):
+        - PAUCLossWrapper for both. For hierarchical models it applies pAUC
+          to the binary head and a downweighted CE to the type head. For
+          naive models it derives a malignant score from softmax internally.
+    """
+    if stage_uses_pauc:
+        from .pauc_loss_wrapper import PAUCLossWrapper
+        return PAUCLossWrapper(
+            data_len=len(train_dataset),
+            benign_idx=benign_idx,
+            type_loss_weight=config.get('hier_type_loss_weight', 0.1),
+            is_hierarchical=is_hierarchical,
+        ).to(device)
+
+    if is_hierarchical:
+        return HierarchicalLoss(
+            alpha=config['hier_alpha'],
+            beta=config['hier_beta'],
+            benign_idx=benign_idx,
+            pos_weight=config.get('hier_pos_weight', 100.0),
+            type_weights=None,
+        ).to(device)
+
+    return nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+
+
 # Lightweight EMA — equivalent to timm.utils.ModelEmaV2 but no extra
 # dependency (since we're already pulling timm for EfficientNet, this is
 # defensive in case timm version differs across environments).
@@ -96,12 +219,15 @@ def train_one_fold(model, fold, config):
         name    = f"{config['model_name']}-{config['phase']}-fold-{fold}"
     )
 
-    use_libauc = config.get('use_libauc', False)
-    use_smoteenn = config.get('use_smoteenn', False)
+    libauc_mode         = config.get('libauc_mode', 'off')
+    libauc_stage2_epoch = int(config.get('libauc_stage2_epoch', -1))
+    use_smoteenn        = config.get('use_smoteenn', False)
 
-    # libauc requires per-sample indices through the loss; only enable
-    # index-returning dataset when libauc is active.
-    return_index = use_libauc
+    # return_index is needed whenever pAUCLoss will be active at any point in
+    # this fold (full mode from epoch 0; two_stage from stage2_epoch). We
+    # set it once based on the mode and unpack with-or-without an idx in the
+    # training loop. Stage-1 batches will carry an unused index — cheap.
+    return_index = (libauc_mode != 'off')
 
     train_dataset, val_dataset, class_weights, class_names, sample_weights = get_datasets(
         csv_path        = config['csv_path'],
@@ -116,57 +242,19 @@ def train_one_fold(model, fold, config):
 
     benign_idx = _resolve_benign_idx(class_names)
 
-    # --- DataLoader: sampler toggle ---
-    if use_libauc:
-        try:
-            from libauc.sampler import DualSampler
-        except ImportError as exc:
-            raise ImportError(
-                "use_libauc=True requires libauc sampler support. Install with `pip install libauc`."
-            ) from exc
+    # Lifted out of the previous if-libauc block so it's available to
+    # _build_train_loader at any stage transition.
+    train_labels_full   = train_dataset.df['iddx_processed'].to_numpy()
+    binary_train_labels = (train_labels_full != benign_idx).astype(np.int64)
 
-        train_labels = train_dataset.df['iddx_processed'].to_numpy()
-        binary_train_labels = (train_labels != benign_idx).astype(np.int64)
-        n_pos = int(binary_train_labels.sum())
-        n_neg = int(binary_train_labels.shape[0] - n_pos)
-        if n_pos == 0 or n_neg == 0:
-            raise ValueError(
-                f"Fold {fold} has invalid binary class mix for LibAUC: n_pos={n_pos}, n_neg={n_neg}."
-            )
+    # Initial stage. In two_stage mode, stage 1 starts as CE/BCE; stage 2
+    # is entered when the epoch counter hits libauc_stage2_epoch.
+    stage_uses_pauc = (libauc_mode == 'full')
 
-        libauc_num_pos = config.get('libauc_num_pos')
-        if libauc_num_pos is not None and int(libauc_num_pos) > 0:
-            dual_sampler = DualSampler(
-                train_dataset,
-                batch_size=config['batch_size'],
-                labels=binary_train_labels,
-                shuffle=True,
-                num_pos=int(libauc_num_pos),
-            )
-        else:
-            dual_sampler = DualSampler(
-                train_dataset,
-                batch_size=config['batch_size'],
-                labels=binary_train_labels,
-                shuffle=True,
-                sampling_rate=float(config.get('libauc_sampling_rate', 0.1)),
-            )
-
-        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'],
-                                  sampler=dual_sampler, shuffle=False,
-                                  num_workers=1, pin_memory=True)
-    elif config.get('use_sampler', False):
-        sampler = WeightedRandomSampler(
-            weights=torch.from_numpy(sample_weights),
-            num_samples=len(train_dataset),
-            replacement=True,
-        )
-        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'],
-                                  sampler=sampler, shuffle=False,
-                                  num_workers=1, pin_memory=True)
-    else:
-        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'],
-                                  shuffle=True, num_workers=1, pin_memory=True)
+    train_loader = _build_train_loader(
+        stage_uses_pauc, train_dataset, binary_train_labels,
+        sample_weights, config, fold,
+    )
 
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'],
                             shuffle=False, num_workers=1, pin_memory=True)
@@ -174,9 +262,11 @@ def train_one_fold(model, fold, config):
     model = model.to(device)
     is_hierarchical = _is_hierarchical(model)
 
-    if use_smoteenn and use_libauc:
-        raise ValueError("SMOTEENN warmup cannot be combined with LibAUC mode.")
-
+    # NOTE: SMOTE warmup is now compatible with all libauc_mode values.
+    # The warmup is self-contained: it runs its own head_optimizer (AdamW)
+    # and head_criterion (HierarchicalLoss for hierarchical, CE for naive)
+    # on resampled embeddings, then exits before the main optimizer/
+    # criterion are built. The two phases never share state.
     if use_smoteenn:
         if not hasattr(model, 'extract_features'):
             raise ValueError(
@@ -201,7 +291,7 @@ def train_one_fold(model, fold, config):
         )
 
         warmup_epochs = int(config.get('smote_warmup_epochs', 5))
-        warmup_lr = float(config.get('smote_head_lr', 1e-3))
+        warmup_lr     = float(config.get('smote_head_lr', 1e-3))
 
         if is_hierarchical:
             if not hasattr(model, 'binary_head') or not hasattr(model, 'type_head'):
@@ -231,7 +321,7 @@ def train_one_fold(model, fold, config):
                     head_optimizer.zero_grad()
                     warmup_outputs = {
                         'binary_logit': model.binary_head(X_batch).squeeze(-1),
-                        'type_logits': model.type_head(X_batch),
+                        'type_logits' : model.type_head(X_batch),
                     }
                     loss, _ = criterion_head(warmup_outputs, y_batch.long())
                     loss.backward()
@@ -270,48 +360,11 @@ def train_one_fold(model, fold, config):
         model.freeze_backbone()
         print(f"  [hier] Backbone frozen for first {config['hier_freeze_backbone_epochs']} epochs.")
 
-    # --- optimizer + scheduler ---
-    # libauc mode: SOPAs replaces AdamW. SOPAs accepts param groups
-    # the same way as torch optimizers, so we share the param-group builder.
-    param_groups = _build_param_groups(
-        model, head_lr=config['lr'],
-        backbone_lr_mult=config.get('backbone_lr_mult', 1.0),
-    )
-
-    if use_libauc:
-        try:
-            from libauc.optimizers import SOPAs
-        except ImportError as exc:
-            raise ImportError(
-                "use_libauc=True requires libauc. Install with `pip install libauc`."
-            ) from exc
-        optimizer = SOPAs(param_groups, mode='adam', lr=config['lr'],
-                          weight_decay=config['weight_decay'])
-    else:
-        optimizer = torch.optim.AdamW(param_groups, lr=config['lr'],
-                                       weight_decay=config['weight_decay'])
-
+    # --- optimizer + criterion + scheduler (for the initial stage) ---
+    optimizer = _build_optimizer(stage_uses_pauc, model, config)
     scheduler = _build_scheduler(optimizer, config)
-
-    # --- loss selection ---
-    if use_libauc:
-        from .pauc_loss_wrapper import PAUCLossWrapper
-        criterion = PAUCLossWrapper(
-            data_len=len(train_dataset),
-            benign_idx=benign_idx,
-            type_loss_weight=config.get('hier_type_loss_weight', 0.1),
-            is_hierarchical=is_hierarchical,
-        ).to(device)
-    elif is_hierarchical:
-        criterion = HierarchicalLoss(
-            alpha      = config['hier_alpha'],
-            beta       = config['hier_beta'],
-            benign_idx = benign_idx,
-            pos_weight = config.get('hier_pos_weight', 100.0),
-            type_weights = None,
-        ).to(device)
-    else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    criterion = _build_criterion(stage_uses_pauc, train_dataset, config,
+                                 benign_idx, is_hierarchical, class_weights, device)
 
     # --- EMA setup ---
     use_ema = config.get('use_ema', False)
@@ -323,11 +376,15 @@ def train_one_fold(model, fold, config):
 
     for epoch in range(config['epochs']):
         # --- handle unfreeze schedule ---
-        # When freeze epoch is reached, either fully unfreeze or partial
-        # unfreeze (only late stages). Either way, rebuild the optimizer
-        # so newly-trainable params are picked up under the right LR group.
-        if is_hierarchical and epoch == config.get('hier_freeze_backbone_epochs', 0) \
-                and config.get('hier_freeze_backbone_epochs', 0) > 0:
+        # Determine whether the unfreeze fires THIS epoch. We don't rebuild
+        # the optimizer yet — the rebuild below collapses unfreeze and
+        # stage-2 switch together when both fire on the same epoch.
+        unfreeze_now = (
+            is_hierarchical
+            and epoch == config.get('hier_freeze_backbone_epochs', 0)
+            and config.get('hier_freeze_backbone_epochs', 0) > 0
+        )
+        if unfreeze_now:
             if config.get('hier_partial_unfreeze', False):
                 model.partial_unfreeze_backbone()
                 print(f"  [hier] Backbone partially unfrozen at epoch {epoch + 1} "
@@ -336,19 +393,30 @@ def train_one_fold(model, fold, config):
                 model.unfreeze_backbone()
                 print(f"  [hier] Backbone fully unfrozen at epoch {epoch + 1}.")
 
-            # Rebuild optimizer with same param groups so newly-unfrozen
-            # backbone params get the discriminative LR.
-            param_groups = _build_param_groups(
-                model, head_lr=config['lr'],
-                backbone_lr_mult=config.get('backbone_lr_mult', 1.0),
+        # --- handle stage-2 switch (CE/BCE -> pAUC) ---
+        switch_now = (
+            libauc_mode == 'two_stage'
+            and libauc_stage2_epoch > 0
+            and epoch == libauc_stage2_epoch
+        )
+        if switch_now:
+            stage_uses_pauc = True
+            print(f"  [stage] Switching to LibAUC pAUC at epoch {epoch + 1}.")
+
+        # Rebuild affected components. The switch is a superset of the
+        # unfreeze rebuild (it also rebuilds train_loader and criterion),
+        # so when both fire together a single switch path covers it all.
+        if switch_now:
+            train_loader = _build_train_loader(
+                True, train_dataset, binary_train_labels,
+                sample_weights, config, fold,
             )
-            if use_libauc:
-                from libauc.optimizers import SOPAs
-                optimizer = SOPAs(param_groups, mode='adam', lr=config['lr'],
-                                  weight_decay=config['weight_decay'])
-            else:
-                optimizer = torch.optim.AdamW(param_groups, lr=config['lr'],
-                                               weight_decay=config['weight_decay'])
+            optimizer = _build_optimizer(True, model, config)
+            scheduler = _build_scheduler(optimizer, config)
+            criterion = _build_criterion(True, train_dataset, config,
+                                         benign_idx, is_hierarchical, class_weights, device)
+        elif unfreeze_now:
+            optimizer = _build_optimizer(stage_uses_pauc, model, config)
             scheduler = _build_scheduler(optimizer, config)
 
         # --- train ---
@@ -379,7 +447,7 @@ def train_one_fold(model, fold, config):
             outputs = model(imgs)
 
             # Compute loss + extract probs for metrics
-            if use_libauc:
+            if stage_uses_pauc:
                 loss, components = criterion(outputs, labels.long(), indices)
                 epoch_L_pauc.append(components['L_pauc'])
                 epoch_L_type.append(components['L_type'])
@@ -426,10 +494,10 @@ def train_one_fold(model, fold, config):
                 outputs = eval_model(imgs)
 
                 # Validation loss is informational only; we use the
-                # ordinary hierarchical/CE loss even in libauc mode so
-                # val_loss is comparable across runs.
+                # ordinary hierarchical/CE loss even in pAUC stage so
+                # val_loss is comparable across stages and runs.
                 if is_hierarchical:
-                    if use_libauc:
+                    if stage_uses_pauc:
                         # Approximate val loss with BCE for tracking only
                         is_mal = (labels != benign_idx).float()
                         vloss = nn.functional.binary_cross_entropy_with_logits(
@@ -440,7 +508,7 @@ def train_one_fold(model, fold, config):
                     probs_batch = outputs['probs_5class']
                     all_binary_probs.extend(torch.sigmoid(outputs['binary_logit']).cpu().numpy())
                 else:
-                    if use_libauc:
+                    if stage_uses_pauc:
                         vloss = nn.functional.cross_entropy(outputs, labels.long())
                     else:
                         vloss = criterion(outputs, labels.long())
@@ -454,8 +522,14 @@ def train_one_fold(model, fold, config):
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss   = val_loss   / len(val_loader)
 
+        # Stage indicator: 1 = CE/BCE phase, 2 = pAUC phase. In 'off' mode
+        # this is 1 throughout; in 'full' mode it's 2 throughout; in
+        # 'two_stage' mode it flips at libauc_stage2_epoch.
+        stage_indicator = 2 if stage_uses_pauc else 1
+
         metrics = {
             'epoch'      : epoch + 1,
+            'stage'      : stage_indicator,
             'train/loss' : avg_train_loss,
             'val/loss'   : avg_val_loss,
             'lr/head'    : optimizer.param_groups[-1]['lr'],
@@ -517,7 +591,7 @@ def train_one_fold(model, fold, config):
         if is_hierarchical and 'val/binary_head/pauc_tpr_ge_80' in metrics:
             pauc_text += f" (binary={metrics['val/binary_head/pauc_tpr_ge_80']:.4f})"
 
-        print(f"[{config['model_name']} | fold {fold} | epoch {epoch+1}] "
+        print(f"[{config['model_name']} | fold {fold} | epoch {epoch+1} | stage {stage_indicator}] "
               f"train_loss={avg_train_loss:.4f} val_loss={avg_val_loss:.4f} "
               f"val_acc={val_acc:.4f} val_auc={val_auc:.4f}{pauc_text}")
 
