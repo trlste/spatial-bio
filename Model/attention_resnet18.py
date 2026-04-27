@@ -66,7 +66,7 @@ class AttentionResNet18(nn.Module):
             (self.stage4, backbone.layer3),
             (self.stage5, backbone.layer4),
         ]:
-            for i, (our_block, their_block) in enumerate(zip(our_stage, their_layer)):
+            for our_block, their_block in zip(our_stage, their_layer):
                 our_block.conv1.load_state_dict(their_block.conv1.state_dict())
                 our_block.conv2.load_state_dict(their_block.conv2.state_dict())
                 #our_block.bn1.load_state_dict(their_block.bn1.state_dict())

@@ -1,7 +1,7 @@
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-IMG_SIZE = 135
+IMG_SIZE = 224
 AUG_PROB = 0.75
 
 train_transform = A.Compose([
@@ -11,10 +11,10 @@ train_transform = A.Compose([
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
-    A.ShiftScaleRotate(
-        shift_limit=0.1,
-        scale_limit=0.1,
-        rotate_limit=45,
+    A.Affine(
+        translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+        scale=(0.9, 1.1),
+        rotate=(-45, 45),
         border_mode=0,   # black padding, avoids edge artifacts
         p=AUG_PROB
     ),
@@ -37,11 +37,10 @@ train_transform = A.Compose([
     # --- Simulate dermoscopy artifacts ---
     # Mimics hair, bubbles, and other occlusions common in skin images
     A.CoarseDropout(
-        max_holes=8,
-        max_height=16,
-        max_width=16,
-        min_holes=1,
-        fill_value=0,
+        num_holes_range=(1, 8),
+        hole_height_range=(0.05, 0.12),
+        hole_width_range=(0.05, 0.12),
+        fill=0,
         p=0.25
     ),
 

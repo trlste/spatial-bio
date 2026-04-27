@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 *.pt
 Paul/scripts/*
+/net/galaxy/home/koes/pas195/Classes/MachineLearning/spatial-bio/Paul/*

@@ -20,3 +20,8 @@ class NaiveResNet18(nn.Module):
         x = torch.flatten(x, 1)
         x = self.dropout(x)
         return self.fc(x)
+
+    def extract_features(self, x):
+        """Return pooled backbone embeddings before dropout/fc."""
+        x = self.backbone(x)
+        return torch.flatten(x, 1)

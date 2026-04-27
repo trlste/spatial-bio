@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .residual_unit import ResidualUnit
 
 class AttentionBlock(nn.Module):
@@ -64,42 +65,31 @@ class AttentionBlock(nn.Module):
         m = self.down1_res(m)
 
         skip_connections = []
-        for i in range(self.skip - 1):
-            skip_connections.append(self.skip_res[i](m))
-            m = self.down_extra[i](m)
-            m = self.down_extra_res[i](m)
+        if x.shape[2] % 4 == 0:
+            for i in range(self.skip - 1):
+                skip_connections.append(self.skip_res[i](m))
+                m = self.down_extra[i](m)
+                m = self.down_extra_res[i](m)
 
-        skip_connections = list(reversed(skip_connections))
+            skip_connections = list(reversed(skip_connections))
 
-        for i in range(self.skip - 1):
-            m = self.up_extra_res[i](m)
-            m = self.up_extra[i](m)
-            sc = skip_connections[i]
-            if m.shape[2] != sc.shape[2] or m.shape[3] != sc.shape[3]:
-                m = torch.nn.functional.interpolate(
-                    m,
-                    size=(sc.shape[2], sc.shape[3]),
-                    mode='bilinear',
-                    align_corners=False
-                )
-            m = m + sc
+            for i in range(self.skip - 1):
+                m = self.up_extra_res[i](m)
+                m = self.up_extra[i](m)
+                m = m + skip_connections[i]
 
         # Soft mask — up
         m = self.up1_res(m)
         m = self.up1(m)
 
-        # upsample m to match trunk spatial size if needed (rounding from pooling/upsampling)
-        if m.shape[2] != trunk.shape[2] or m.shape[3] != trunk.shape[3]:
-            m = torch.nn.functional.interpolate(
-                m,
-                size=(trunk.shape[2], trunk.shape[3]),
-                mode='bilinear',
-                align_corners=False
-            )
+        # Match mask spatial size to trunk even when odd dimensions are present.
+        if m.shape[2:] != trunk.shape[2:]:
+            m = F.interpolate(m, size=trunk.shape[2:], mode='bilinear', align_corners=False)
 
         m = self.mask_conv2(self.mask_conv1(m))
         m = self.sigmoid(m)
 
-        out = (1 + m) * trunk
+        # Residual attention: keep trunk path and gate salient responses.
+        out = trunk * (1.0 + m)
         out = self.post(out)
         return out
