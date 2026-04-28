@@ -1,3 +1,7 @@
+## Hierarchical ResNet18 for Multi-Class Skin Cancer Classification
+
+Follow these steps to launch training. SMOTE is included by default.
+
 Install packages and activate conda environment via:
 ```
 conda env create -f environment.yml -n isic2024
